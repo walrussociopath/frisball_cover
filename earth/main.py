@@ -29,4 +29,4 @@ def draw(long, lat):
 
 
 if __name__ == '__main__':
-    draw(22, 38)
+    draw(25, 42)
