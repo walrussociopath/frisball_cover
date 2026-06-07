@@ -21,7 +21,7 @@ def draw(long, lat):
     ax.set_global()
 
     # Сохраняем с прозрачным фоном и без сетки
-    plt.savefig(f'globe_nudes/{long}_{lat}.png', 
+    plt.savefig(f'images/globe_{long}_{lat}.png', 
                 dpi=300, 
                 transparent=True,      # Файл PNG с прозрачностью
                 bbox_inches='tight',
