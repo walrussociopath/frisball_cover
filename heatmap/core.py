@@ -1,5 +1,6 @@
-from typing import Collection, Generator
+from typing import Collection, Generator, Literal
 import logging
+from uuid import uuid4
 
 import cartopy.io.shapereader as shapereader
 import matplotlib.pyplot as plt
@@ -20,6 +21,62 @@ from utils import elapse_time, in_thread
 type City = tuple[str, float, float, float]
 
 
+
+
+def gauss_heat(r: float, dist: float):
+    # Каждый город создает пятно МАКСИМАЛЬНОЙ интенсивности (1.0)
+    influence = np.exp(-dist**2 / (2 * r**2))
+    return influence
+
+
+def exp_heat(r, dist):
+    scale = r * 12.0  # Длинный хвост (чем больше, тем длиннее)
+    # Лапласовское распределение (экспоненциальное)
+    influence = np.exp(-np.abs(dist) / scale)
+    return influence
+
+
+def add_circular_noise(influence, amplitude=0.1, frequency=20):
+    """Добавляет шум, нарушающий круговую симметрию"""
+    rows, cols = influence.shape
+    
+    # Угловой шум (нарушает круговую симметрию)
+    theta = np.random.rand(rows, cols) * 2 * np.pi
+    angular_noise = amplitude * np.sin(frequency * theta)
+    
+    # Радиальный шум
+    radial_noise = amplitude * np.random.randn(rows, cols) * 0.5
+    
+    return influence * (1 + angular_noise + radial_noise)
+
+
+def add_fractal_background(influence, intensity=0.007, octaves=2):
+    """Добавляет фрактальный шум на фон"""
+    rows, cols = influence.shape
+    
+    noise = np.zeros((rows, cols))
+    
+    for octave in range(octaves):
+        freq = 2 ** octave
+        amp = intensity / (2 ** octave)
+        
+        y, x = np.ogrid[:rows, :cols]
+        phase_x = x * freq * 2 * np.pi / cols
+        phase_y = y * freq * 2 * np.pi / rows
+        
+        octave_noise = amp * (
+            np.sin(phase_x) * np.cos(phase_y) +
+            np.sin(phase_x * 1.7) * 0.3
+        )
+        
+        noise += octave_noise
+    
+    # Добавляем случайную составляющую
+    noise += np.random.randn(rows, cols) * intensity * 0.2
+    
+    return influence + np.abs(noise)
+
+
 class Drawer:
     def __init__(
         self, 
@@ -28,12 +85,20 @@ class Drawer:
         #                                              lat  lat lon lon
         view_zone: tuple[float, float, float, float] = (25, 50, 40, 70),
         grid_resolution: int = 1000,
+        base_heat: float = 0.04,
+        cumulativity: float = 0.6,
+        r_coef: float = 0.1,
+        alg: Literal['gauss', 'exp'] = 'exp',
     ):
         """
         cities: Города в формате (Название, широта, долгота, коэффициент интенсивности радиуса)
         regions: Названия регионов 
         view_zone: Диапазон отображения карты по долготам и широтам
         grid_resolution: Сколько точек используется в сетке (Чем больше, тем плавнее картинка)
+        base_heat: Теплота минимальных участков
+        cumulativity: Насколько сильно сливается теплота соседних городов
+        r_coef: Управление радиусом очагов городов 
+        alg: Алгоритм построения очагов
         """
         self._cities = cities
         self._unpack_cities()
@@ -42,6 +107,10 @@ class Drawer:
         self._regions_shapes = set(find_regions_records(regions))
         self._view_zone = view_zone
         self._resolution = grid_resolution
+        self._base_heat = base_heat
+        self._cumulativity = cumulativity
+        self._r_coef = r_coef
+        self._alg = alg
 
         # Канвас
         self.fig, self.ax = plt.subplots(
@@ -98,25 +167,21 @@ class Drawer:
         plt.show()
 
     def _draw_heatmap(self, apply_region_mask: bool = True):
-        cumulativity = 0.6 
-        base_heat = 0.02
-
         lon_grid, lat_grid = self._create_grid()
         heat = np.zeros(lon_grid.shape)
-        
+
         with elapse_time('Calculation heat'):
-            for lon, lat, r in zip(self._lons, self._lats, self._coeffs):
+            for name, lon, lat, r in zip(self._cities, self._lons, self._lats, self._coeffs):
                 # Расстояние до каждой точки сетки
                 dist = np.sqrt((lon_grid - lon)**2 + (lat_grid - lat)**2)
                 # Радиус влияния (фиксированный для всех)
-                radius = r / 2
-                sigma = radius * 1.2
-                # Каждый город создает пятно МАКСИМАЛЬНОЙ интенсивности (1.0)
-                influence = np.exp(-dist**2 / (2 * sigma**2))
-
-                heat = (1 - cumulativity) * np.maximum(heat, influence) + cumulativity * (heat + influence)
+                influence = self._get_influence(r * self._r_coef, dist) 
+                
+                influence = add_circular_noise(influence)
+                influence = add_fractal_background(influence)
+                heat = (1 - self._cumulativity) * np.maximum(heat, influence) + self._cumulativity * (heat + influence)
                 # Ограничиваем максимум 1
-                heat = base_heat + (1 - base_heat) * np.minimum(heat, 1)
+                heat = self._base_heat + (1 - self._base_heat) * np.minimum(heat, 1)
 
         if apply_region_mask:
             heat = self._apply_region_mask(heat)
@@ -125,7 +190,13 @@ class Drawer:
                         transform=ccrs.PlateCarree(),
                         cmap='hot', alpha=0.7, shading='auto',
                         vmin=0, vmax=1)    
-        
+
+    def _get_influence(self, r: float, dist):
+        if self._alg == 'gauss':
+            return gauss_heat(r, dist)
+        if self._alg == 'exp':
+            return exp_heat(r, dist)
+
     def _apply_region_mask(self, heat): 
         combined_regions = unary_union([record.geometry for record in self._regions_shapes])
         lon_grid, lat_grid = self._create_grid() 
@@ -158,7 +229,10 @@ class Drawer:
         if add_heatmap:
             self._draw_heatmap(apply_region_mask=apply_region_mask)
 
-        self.set_canvas_options()
+        self.set_canvas_options(
+            draw_coastline=add_coastline,
+            draw_gridlines=add_gridlines,
+        )
         plt.show()
 
     def set_canvas_options(self, draw_coastline: bool = True, draw_gridlines: bool = True) -> None:
@@ -168,7 +242,9 @@ class Drawer:
         if draw_gridlines:
             self.ax.gridlines(draw_labels=True, dms=True, x_inline=False, y_inline=False)
 
-
+    def save(self):
+        self.fig.savefig(f'{uuid4()}.png', dpi=300, bbox_inches='tight', facecolor='white')
+    
 
 shp = shapereader.natural_earth(resolution='50m', category='cultural', name='admin_1_states_provinces')
 reader = shapereader.Reader(shp)
