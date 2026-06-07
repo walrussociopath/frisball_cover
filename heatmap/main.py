@@ -1,5 +1,5 @@
 import logging
-from core import Drawer
+from core import City, Drawer, HeatConfig
 
 
 REGIONS = {
@@ -36,7 +36,7 @@ REGIONS = {
 
 # Запрос в гугл: координата <город> в десятичном формате
 
-CITIES = [
+CITIES: tuple[City, ...] = (
     # Город,         lat,       lon,       интенсивность
     ('Великие Луки', 56.331832, 30.543955, 1),
     ('Кунья', 56.293137, 30.980253, 0.8),
@@ -53,14 +53,16 @@ CITIES = [
     ('Санкт-Петербург', 59.939095, 30.315868, 0.5),
     ('Брянск', 53.2427, 34.3639, 0.4),
     ('Краснодар', 45.035470, 38.975313, 0.15),
-]
-
+)
 
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
+    
+    # Можно крутить конфигурацию жары
+    heat_config = HeatConfig(cumulativity=0.6)
 
-    dr = Drawer(cities=CITIES, regions=REGIONS, cumulativity=0.6)
-
+    dr = Drawer(cities=CITIES, regions=REGIONS, heat_config=heat_config)
+    
     dr.draw(add_cities=False, add_coastline=False, add_gridlines=False)
     dr.save()
